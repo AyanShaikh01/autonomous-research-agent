@@ -3,41 +3,119 @@ import time
 import streamlit as st
 from typing import List, TypedDict, Literal
 from dotenv import load_dotenv
-
-# We use Pydantic to force the LLM to output perfect variables
 from pydantic import BaseModel, Field
-
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 
 load_dotenv()
+import wikipedia
 
-# ==========================================
-# 0. UI CONFIG & CUSTOM CSS
-# ==========================================
-st.set_page_config(page_title="DeepResearch AI", page_icon="⚡", layout="wide")
+wikipedia.set_user_agent("DeepResearchAgent/1.0 (college_project@example.com)")
+
+
+# 0. UI CONFIG & CUSTOM CSS (MODERN SAAS THEME)
+
+st.set_page_config(
+    page_title="DeepResearch AI", 
+    page_icon="⚡", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
 
 st.markdown("""
 <style>
-    [data-testid="stMetric"] {
-        background-color: #1E1E2E;
-        border: 1px solid #333344;
-        padding: 15px;
-        border-radius: 8px;
+    /* Main Background & Font Styling */
+    .stApp {
+        background-color: #0B0F19;
+        color: #F3F4F6;
     }
-    [data-testid="stMetricValue"] { color: #00FFAA; }
-    .stTabs [data-baseweb="tab-list"] { gap: 20px; }
+    
+    /* Sidebar Styling */
+    [data-testid="stSidebar"] {
+        background-color: #030712;
+        border-right: 1px solid #1F2937;
+    }
+
+    /* Glassmorphism Metric Cards */
+    [data-testid="stMetric"] {
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.7) 100%);
+        border: 1px solid rgba(51, 65, 85, 0.5);
+        padding: 18px;
+        border-radius: 12px;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+    }
+    [data-testid="stMetricValue"] {
+        color: #38BDF8 !important;
+        font-weight: 700;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #94A3B8 !important;
+    }
+
+    /* Sleek Input Fields */
+    [data-testid="stTextInput"] input {
+        background-color: #111827;
+        color: #FFFFFF;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        padding: 10px 14px;
+    }
+    [data-testid="stTextInput"] input:focus {
+        border-color: #38BDF8;
+        box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+    }
+
+    /* Primary Buttons */
+    .stButton button[kind="primary"] {
+        background: linear-gradient(135deg, #3B82F6 0%, #1D4ED8 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        padding: 0.6rem 1.2rem;
+        transition: all 0.2s ease-in-out;
+    }
+    .stButton button[kind="primary"]:hover {
+        background: linear-gradient(135deg, #2563EB 0%, #1E40AF 100%);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    }
+
+    /* Custom Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+        border-bottom: 1px solid #1F2937;
+        padding-bottom: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: transparent;
+        color: #94A3B8;
+        border-radius: 6px;
+        padding: 8px 16px;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1E293B !important;
+        color: #38BDF8 !important;
+    }
+
+    /* Divider */
+    hr {
+        border-color: #1F2937;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 if "history" not in st.session_state:
     st.session_state.history = {}
 
-# ==========================================
+
 # 1. STATE & PYDANTIC SCHEMAS
-# ==========================================
+
 class ResearchState(TypedDict):
     research_topic: str
     search_queries: List[str]
@@ -51,29 +129,29 @@ class ResearchState(TypedDict):
 class PlannerOutput(BaseModel):
     requires_clarification: bool = Field(description="True ONLY if the topic is incredibly vague (e.g., a single word like 'Apple' or 'Rust').")
     clarification_question: str = Field(description="If requires_clarification is true, the question to ask the user.")
-    search_queries: List[str] = Field(description="List of exactly 3 specific Wikipedia search queries.")
+    search_queries: List[str] = Field(description="List of exactly 3 Wikipedia search queries. MUST BE SHORT NOUNS ONLY (e.g., 'Figure AI', 'Humanoid robot'). Never use long sentences.")
 
 class EvaluatorOutput(BaseModel):
     is_sufficient: bool = Field(description="True if the context contains enough facts to write a report.")
-    search_queries: List[str] = Field(description="Exactly 2 new specific search queries to fill gaps if context is insufficient.")
+    search_queries: List[str] = Field(description="Exactly 2 new specific search queries to fill gaps. MUST BE SHORT NOUNS ONLY (e.g., 'Robotics', 'Artificial intelligence').")
 
 # Initialize Wikipedia tool (Zero rate limits)
 api_wrapper = WikipediaAPIWrapper(top_k_results=2, doc_content_chars_max=2500)
 search_tool = WikipediaQueryRun(api_wrapper=api_wrapper)
 
 def get_llm():
-    # Using the active 120B model on Groq's free tier
+    
     return ChatGroq(model="openai/gpt-oss-120b", temperature=st.session_state.get("temperature", 0.0))
 
-# ==========================================
+
 # 2. AGENT NODES
-# ==========================================
+
 def planner_node(state: ResearchState):
     st.session_state.ui_status.write("🧠 **Analyzing topic and planning queries...**")
     
     prompt = f"Analyze the topic: '{state['research_topic']}'. If it's a single ambiguous word, flag it. Otherwise, provide 3 specific Wikipedia queries."
     
-    # Force structured output via Pydantic
+    
     structured_llm = get_llm().with_structured_output(PlannerOutput)
     response = structured_llm.invoke(prompt)
     
@@ -99,8 +177,9 @@ def searcher_node(state: ResearchState):
                 st.session_state.ui_status.write(f"⚠️ **Warning:** No Wikipedia page found for '{query}'.")
             else:
                 all_contexts.append(f"Source ({query}):\n{results}")
-        except Exception:
-            st.session_state.ui_status.write(f"⚠️ **Error:** Search failed for '{query}'.")
+        except Exception as e:
+           
+            st.session_state.ui_status.write(f"⚠️ **Error Details for '{query}':** {str(e)}")
             
     return {"raw_context": all_contexts, "iteration_count": state.get("iteration_count", 0) + 1}
 
@@ -129,9 +208,9 @@ def writer_node(state: ResearchState):
     st.session_state.ui_status.update(label="✅ **Execution Complete!**", state="complete", expanded=False)
     return {"final_report": report.content}
 
-# ==========================================
+
 # 3. ROUTING & GRAPH COMPILATION
-# ==========================================
+
 def route_research(state: ResearchState) -> Literal["searcher", "writer"]:
     if len(state["search_queries"]) == 0 or state["iteration_count"] >= st.session_state.get("max_loops", 2):
         return "writer"
@@ -155,9 +234,9 @@ workflow.add_conditional_edges("evaluator", route_research)
 workflow.add_edge("writer", END)
 research_app = workflow.compile()
 
-# ==========================================
+
 # 4. STREAMLIT UI
-# ==========================================
+
 with st.sidebar:
     st.title("⚙️ Agent Settings")
     st.session_state.temperature = st.slider("Model Creativity", 0.0, 1.0, 0.0, 0.1)
@@ -171,15 +250,22 @@ with st.sidebar:
                 st.session_state.current_view = past_topic
 
 st.title("⚡ Autonomous DeepResearch AI")
-col1, col2 = st.columns([4, 1])
-with col1:
-    topic = st.text_input("Topic", placeholder="e.g., Commercial viability of solid-state batteries", label_visibility="collapsed")
-with col2:
-    start_btn = st.button("🚀 Dispatch Agent", use_container_width=True, type="primary")
+
+# Form to prevent "Enter" key bugs
+
+with st.form("research_form"):
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        topic = st.text_input("Topic", placeholder="e.g., Commercial viability of solid-state batteries", label_visibility="collapsed")
+    with col2:
+        start_btn = st.form_submit_button("🚀 Dispatch Agent", use_container_width=True, type="primary")
 
 if start_btn and topic:
     st.session_state.pop("awaiting_human", None)
     start_time = time.time()
+    
+    # Status container must be outside the form
+    
     st.session_state.ui_status = st.status("Initializing Agent Engine...", expanded=True)
     
     result = research_app.invoke({"research_topic": topic, "iteration_count": 0, "raw_context": []})
@@ -189,6 +275,7 @@ if start_btn and topic:
         st.session_state.awaiting_human = result
     else:
         elapsed = time.time() - start_time
+        st.session_state.ui_status.update(label="✅ **Execution Complete!**", state="complete", expanded=False)
         st.session_state.history[topic] = {
             "report": result.get("final_report", ""),
             "iterations": result.get("iteration_count", 0),
@@ -199,6 +286,7 @@ if start_btn and topic:
         st.session_state.current_view = topic
 
 # Human-in-the-Loop UI
+
 if "awaiting_human" in st.session_state:
     st.warning("⚠️ **The agent needs your help to proceed.**")
     st.info(f"**Agent asks:** {st.session_state.awaiting_human['clarification_question']}")
@@ -213,6 +301,7 @@ if "awaiting_human" in st.session_state:
         result = research_app.invoke({"research_topic": refined_topic, "iteration_count": 0, "raw_context": []})
         elapsed = time.time() - start_time
         
+        st.session_state.ui_status.update(label="✅ **Execution Complete!**", state="complete", expanded=False)
         st.session_state.history[refined_topic] = {
             "report": result.get("final_report", ""),
             "iterations": result.get("iteration_count", 0),
